@@ -2,6 +2,7 @@
 
 #include "ble_manager.h"
 #include "diagnostics.h"
+#include "haptic_manager.h"
 
 namespace {
 
@@ -33,9 +34,10 @@ void setup()
     Serial.println();
     Serial.println(F("========== Notifense ANCS v0 =========="));
     Serial.println(F("Adafruit Bluefruit + Nordic S140 SoftDevice"));
-    Serial.println(F("Serial diagnostics and status LEDs only; haptics are disabled"));
+    Serial.println(F("ANCS notifications with DRV2605 haptic feedback"));
     diagnostics::blinkLed(LED_BLUE, 1);
 
+    hapticManager::begin();
     bleManager::begin();
 }
 
