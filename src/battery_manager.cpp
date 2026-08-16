@@ -21,11 +21,13 @@ struct ChargeCurvePoint {
     uint8_t percentage;
 };
 
-// Generic approximation for a 1-cell 3.7 V Li-ion/LiPo battery. Voltage-based
-// state of charge varies with the cell, load, temperature, and charging state.
+// Approximation for the installed 1-cell LiPo. The measured charger cycle
+// stops at 4.099 V and resumes at 4.096 V, so both sides of that small
+// maintenance hysteresis are treated as full. The rest remains an estimate:
+// voltage-based state of charge varies with load, temperature, and charging.
 constexpr ChargeCurvePoint CHARGE_CURVE[] = {
-    {4.20F, 100},
-    {4.11F, 90},
+    {4.09F, 100},
+    {4.06F, 90},
     {4.02F, 80},
     {3.95F, 70},
     {3.87F, 60},
