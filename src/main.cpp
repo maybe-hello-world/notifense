@@ -10,6 +10,14 @@ namespace {
 constexpr uint32_t SERIAL_BAUD = 9600;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 
+void restartDevice()
+{
+    Serial.println(F("[SYSTEM] Restarting..."));
+    Serial.flush();
+    delay(50);
+    NVIC_SystemReset();
+}
+
 void handleSerialCommands()
 {
     while (Serial.available() > 0) {
@@ -18,6 +26,8 @@ void handleSerialCommands()
             bleManager::clearBonds();
         } else if (command == 'b' || command == 'B') {
             batteryManager::reportStatus();
+        } else if (command == 'r' || command == 'R') {
+            restartDevice();
         }
     }
 }
