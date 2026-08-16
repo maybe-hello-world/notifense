@@ -1,5 +1,6 @@
 #include <Arduino.h>
 
+#include "battery_manager.h"
 #include "ble_manager.h"
 #include "diagnostics.h"
 #include "haptic_manager.h"
@@ -15,6 +16,8 @@ void handleSerialCommands()
         const char command = static_cast<char>(Serial.read());
         if (command == 'c' || command == 'C') {
             bleManager::clearBonds();
+        } else if (command == 'b' || command == 'B') {
+            batteryManager::reportStatus();
         }
     }
 }
@@ -37,6 +40,7 @@ void setup()
     Serial.println(F("ANCS notifications with DRV2605 haptic feedback"));
     diagnostics::blinkLed(LED_BLUE, 1);
 
+    batteryManager::begin();
     hapticManager::begin();
     bleManager::begin();
 }
