@@ -110,6 +110,11 @@ float readVoltage()
     return adcVoltage * VBAT_DIVIDER_RATIO;
 }
 
+uint8_t readPercentage()
+{
+    return estimateChargePercentage(readVoltage());
+}
+
 bool isCharging()
 {
     return digitalRead(CHARGE_STATUS_PIN) == LOW;
