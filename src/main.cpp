@@ -4,6 +4,8 @@
 #include "ble_manager.h"
 #include "diagnostics.h"
 #include "haptic_manager.h"
+#include "power_manager.h"
+#include "voltage_history.h"
 
 namespace {
 
@@ -47,9 +49,22 @@ void dispatchSerialCommand()
             hapticManager::playEffect(1);
             break;
         
+        case 'v':
+        case 'V':
+            voltageHistory::report();
+            break;
+        
         case 'h':
         case 'H':
-            Serial.println(F("[SERIAL] Commands: B=battery, C=clear bonds, R=retry BLE, P=play haptic, H=help"));
+            Serial.println(
+                F("[SERIAL] Commands: "
+                "B=battery, "
+                "V=voltage history, "
+                "C=clear bonds, "
+                "R=retry BLE, "
+                "P=play haptic, "
+                "H=help")
+            );
             break;
 
         default:
@@ -121,15 +136,24 @@ void setup()
     batteryManager::begin();
     hapticManager::begin();
     bleManager::begin();
-    
-    // Ensure libraries/core initialization didn't leave an LED asserted.
+
+    // Bluefruit must already be running before voltageHistory::begin(),
+    // because it uses the SoftDevice API to query VBUS.
+    powerManager::begin();
+    voltageHistory::begin();
+
+    // Also fixes our delightful mystery-red-LED situation after all
+    // third-party initialization is complete.
     diagnostics::turnLedsOff();
 }
 
 void loop()
 {
     handleSerialCommands();
+
     hapticManager::update();
     bleManager::update();
+    voltageHistory::update();
+
     delay(100);
 }
