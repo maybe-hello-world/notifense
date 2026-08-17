@@ -439,7 +439,9 @@ void updateAncsSetup(unsigned long now)
     }
 
     Serial.println(F("enabled"));
-    Serial.println(F("[ANCS] Ready for iOS notifications"));
+    Serial.print(F("[ANCS] Ready for iOS notifications at "));
+    Serial.print(millis());
+    Serial.println(F(" ms"));
     ancsSetupState = AncsSetupState::Ready;
     readyConnectionState.store(
         connectionState,
@@ -626,8 +628,12 @@ void bleEventCallback(ble_evt_t *event)
             const uint8_t reason =
                 event->evt.gap_evt.params.disconnected.reason;
 
-            Serial.print(F("[BLE] DISCONNECTED, HCI reason = 0x"));
-            if (reason < 0x10) Serial.print('0');
+            Serial.print(F("[BLE] Disconnected at "));
+            Serial.print(millis());
+            Serial.print(F(" ms; reason = 0x"));
+            if (reason < 0x10) {
+                Serial.print('0');
+            }
             Serial.println(reason, HEX);
 
             endConnectionSession(connectionHandle);
