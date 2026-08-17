@@ -40,6 +40,17 @@ void dispatchSerialCommand()
         case 'R':
             bleManager::retryAncsConnection();
             break;
+        
+        case 'p':
+        case 'P':
+            Serial.println(F("[SERIAL] Playing test haptic effect"));
+            hapticManager::playEffect(1);
+            break;
+        
+        case 'h':
+        case 'H':
+            Serial.println(F("[SERIAL] Commands: B=battery, C=clear bonds, R=retry BLE"));
+            break;
 
         default:
             break;
