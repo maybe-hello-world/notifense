@@ -121,6 +121,9 @@ void setup()
     batteryManager::begin();
     hapticManager::begin();
     bleManager::begin();
+    
+    // Ensure libraries/core initialization didn't leave an LED asserted.
+    diagnostics::turnLedsOff();
 }
 
 void loop()
