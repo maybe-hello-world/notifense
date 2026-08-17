@@ -49,7 +49,7 @@ void dispatchSerialCommand()
         
         case 'h':
         case 'H':
-            Serial.println(F("[SERIAL] Commands: B=battery, C=clear bonds, R=retry BLE"));
+            Serial.println(F("[SERIAL] Commands: B=battery, C=clear bonds, R=retry BLE, P=play haptic, H=help"));
             break;
 
         default:
