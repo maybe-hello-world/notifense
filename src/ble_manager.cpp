@@ -16,35 +16,13 @@ constexpr char DEVICE_NAME[] = "Notifense";
 constexpr int8_t TX_POWER_DBM = 0;
 constexpr uint16_t CONNECTION_INTERVAL_MIN_MS = 150;
 constexpr uint16_t CONNECTION_INTERVAL_MAX_MS = 165;
-constexpr uint16_t CONNECTION_INTERVAL_MIN_UNITS =
-    CONNECTION_INTERVAL_MIN_MS * 4 / 5;
-constexpr uint16_t CONNECTION_INTERVAL_MAX_UNITS =
-    CONNECTION_INTERVAL_MAX_MS * 4 / 5;
 constexpr uint16_t CONNECTION_SLAVE_LATENCY = 4;
 constexpr uint16_t CONNECTION_SUPERVISION_TIMEOUT_MS = 6000;
-constexpr uint16_t CONNECTION_SUPERVISION_TIMEOUT_UNITS =
-    CONNECTION_SUPERVISION_TIMEOUT_MS / 10;
-constexpr unsigned long CONNECTION_PARAMETER_RETRY_DELAY_MS = 1000;
-constexpr unsigned long CONNECTION_PARAMETER_REPORT_DELAY_MS = 3000;
-constexpr unsigned long SECURITY_RETRY_DELAY_MS = 10000;
-constexpr unsigned long SECURITY_TIMEOUT_MS = 60000;
-constexpr unsigned long ANCS_SETUP_INITIAL_DELAY_MS = 250;
-constexpr unsigned long ANCS_SETUP_SLOW_RETRY_MS = 30000;
-constexpr unsigned long ANCS_SETUP_RETRY_DELAYS_MS[] = {
-    500,
-    1000,
-    2000,
-    5000,
-    10000,
-    10000,
-};
-constexpr uint8_t ANCS_SETUP_RETRY_DELAY_COUNT =
-    sizeof(ANCS_SETUP_RETRY_DELAYS_MS)
-        / sizeof(ANCS_SETUP_RETRY_DELAYS_MS[0]);
-constexpr uint8_t ANCS_SETUP_MAX_ATTEMPTS =
-    ANCS_SETUP_RETRY_DELAY_COUNT + 1;
-constexpr uint8_t ANCS_CLEANUP_DISCONNECT_ACCEPTED = 1U << 0;
-constexpr uint8_t ANCS_CLEANUP_DISCONNECT_OBSERVED = 1U << 1;
+constexpr unsigned long ANCS_RECONNECT_DELAY_MS = 5000;
+constexpr unsigned long ADVERTISING_RESTART_DELAY_MS = 2000;
+constexpr unsigned long CLEANUP_DISCONNECT_RETRY_DELAY_MS = 1000;
+constexpr uint8_t ANCS_MAX_SETUP_ATTEMPTS = 3;
+constexpr uint8_t CLEANUP_DISCONNECT_MAX_ATTEMPTS = 3;
 constexpr uint16_t FAST_ADVERTISING_INTERVAL = 32;
 constexpr uint16_t SLOW_ADVERTISING_INTERVAL = 1636;
 constexpr uint8_t FAST_ADVERTISING_TIMEOUT_SECONDS = 30;
@@ -89,22 +67,27 @@ constexpr uint8_t CHARGE_LEVEL_GOOD = 1;
 constexpr uint8_t CHARGE_LEVEL_LOW = 2;
 constexpr uint8_t CHARGE_LEVEL_CRITICAL = 3;
 
-class RecoverableBLEAncs : public BLEAncs {
-public:
-    void setConnectionHandleForCleanup(uint16_t connectionHandle)
+class CleanupAwareBLEAncs : public BLEAncs {
+  public:
+    void prepareForDisconnectCleanup(uint16_t connectionHandle)
     {
+        // BLEAncs temporarily invalidates this parent handle during discovery.
+        // Restoring it lets Bluefruit's normal disconnect path clear any
+        // partially discovered child characteristics.
         _conn_hdl = connectionHandle;
     }
 };
 
-RecoverableBLEAncs ancsClient;
-BLEClientService ancsPresenceProbe(BLEANCS_UUID_SERVICE);
-BLEClientService genericAttributeService(UUID16_SVC_GENERIC_ATTRIBUTE);
-BLEClientCharacteristic serviceChangedCharacteristic(
-    UUID16_CHR_SERVICE_CHANGED
-);
+CleanupAwareBLEAncs ancsClient;
 BLEBas batteryService;
 BLECharacteristic batteryLevelStatus(BATTERY_LEVEL_STATUS_UUID);
+
+enum class AncsSetupState : uint8_t {
+    Idle,
+    Waiting,
+    Ready,
+    Failed,
+};
 
 unsigned long nextStatusAt = 0;
 unsigned long nextLowBatteryLedAt = 0;
@@ -112,61 +95,27 @@ unsigned long nextBatteryLevelUpdateAt = 0;
 unsigned long nextChargingStatusUpdateAt = 0;
 uint8_t currentBatteryLevel = 0;
 bool currentCharging = false;
-std::atomic<bool> lowPowerParameterRequestSent(false);
-std::atomic<bool> connectionParameterRetryPending(false);
-uint16_t connectionParameterRetryHandle = 0;
-unsigned long connectionParameterRetryAt = 0;
-std::atomic<bool> connectionParameterReportPending(false);
-uint16_t connectionParameterReportHandle = 0;
-unsigned long connectionParameterReportAt = 0;
 std::atomic<bool> immediateSearchLedPending(false);
 
-std::atomic<uint32_t> connectionSession(0);
-std::atomic<uint16_t> activeConnectionHandle(BLE_CONN_HANDLE_INVALID);
-std::atomic<bool> ancsReady(false);
-std::atomic<bool> ancsCacheDirty(false);
-std::atomic<bool> ancsCleanupArmed(false);
-std::atomic<uint8_t> ancsCleanupProgress(0);
-std::atomic<uint32_t> ancsCleanupSession(0);
-std::atomic<uint16_t> ancsCleanupConnectionHandle(
-    BLE_CONN_HANDLE_INVALID
-);
-std::atomic<bool> ancsSetupRequested(false);
-std::atomic<uint32_t> ancsSetupRequestSession(0);
-std::atomic<uint16_t> ancsSetupRequestHandle(BLE_CONN_HANDLE_INVALID);
-std::atomic<bool> serviceChangedPending(false);
-std::atomic<uint32_t> serviceChangedSession(0);
-std::atomic<uint16_t> serviceChangedConnectionHandle(
-    BLE_CONN_HANDLE_INVALID
-);
-std::atomic<uint16_t> serviceChangedStartHandle(0);
-std::atomic<uint16_t> serviceChangedEndHandle(0);
-
-uint32_t managedConnectionSession = 0;
-uint16_t managedConnectionHandle = BLE_CONN_HANDLE_INVALID;
-bool ancsSetupActive = false;
-bool serviceChangedSubscribed = false;
-uint8_t ancsSetupAttemptCount = 0;
+constexpr uint32_t NO_CONNECTION_STATE = 0x0000FFFFUL;
+std::atomic<uint32_t> activeConnectionState(NO_CONNECTION_STATE);
+std::atomic<uint32_t> encryptedConnectionState(NO_CONNECTION_STATE);
+std::atomic<uint32_t> readyConnectionState(NO_CONNECTION_STATE);
+uint16_t connectionGeneration = 0;
+uint32_t managedConnectionState = NO_CONNECTION_STATE;
+AncsSetupState ancsSetupState = AncsSetupState::Idle;
 unsigned long nextAncsSetupAt = 0;
-uint32_t securityConnectionSession = 0;
-uint16_t securityConnectionHandle = BLE_CONN_HANDLE_INVALID;
-bool securitySetupRequested = false;
-bool securityDisconnectPending = false;
-unsigned long securityStartedAt = 0;
-unsigned long nextSecurityRetryAt = 0;
+uint8_t ancsSetupAttemptCount = 0;
+bool cleanupOnNextConnection = false;
+uint8_t cleanupDisconnectAttemptCount = 0;
+unsigned long cleanupDisconnectRetryAt = 0;
+bool recoveryDisconnectExpected = false;
+bool advertisingRestartPending = false;
+unsigned long advertisingRestartAt = 0;
+std::atomic<bool> notificationProcessing(false);
 
-void connectCallback(uint16_t connectionHandle);
-void disconnectCallback(uint16_t connectionHandle, uint8_t reason);
-void pairingCompleteCallback(uint16_t connectionHandle, uint8_t authStatus);
-void connectionSecuredCallback(uint16_t connectionHandle);
 void notificationCallback(AncsNotification_t *notification);
-void requestLowPowerConnectionParameters(uint16_t connectionHandle);
-void updateConnectionSecurity(unsigned long now);
-void serviceChangedCallback(
-    BLEClientCharacteristic *characteristic,
-    uint8_t *data,
-    uint16_t length
-);
+void bleEventCallback(ble_evt_t *event);
 
 void signalBleError()
 {
@@ -177,631 +126,327 @@ void signalBleError()
     );
 }
 
-enum class AncsSetupResult : uint8_t {
-    Ready,
-    Retry,
-    Reconnect,
-    Stale,
-};
-
-bool connectionSessionMatches(uint32_t session, uint16_t connectionHandle)
+uint32_t encodeConnectionState(
+    uint16_t generation,
+    uint16_t connectionHandle
+)
 {
-    return connectionSession.load(std::memory_order_acquire) == session
-        && activeConnectionHandle.load(std::memory_order_acquire)
-            == connectionHandle;
+    return static_cast<uint32_t>(generation) << 16 | connectionHandle;
+}
+
+uint16_t connectionHandleFromState(uint32_t state)
+{
+    return static_cast<uint16_t>(state & 0xFFFFU);
 }
 
 void beginConnectionSession(uint16_t connectionHandle)
 {
-    ancsReady.store(false, std::memory_order_release);
-    ancsSetupRequested.store(false, std::memory_order_release);
-    serviceChangedPending.store(false, std::memory_order_release);
-    activeConnectionHandle.store(connectionHandle, std::memory_order_release);
-    connectionSession.fetch_add(1, std::memory_order_acq_rel);
-}
-
-void endConnectionSession()
-{
-    ancsReady.store(false, std::memory_order_release);
-    ancsSetupRequested.store(false, std::memory_order_release);
-    serviceChangedPending.store(false, std::memory_order_release);
-    activeConnectionHandle.store(
-        BLE_CONN_HANDLE_INVALID,
+    readyConnectionState.store(
+        NO_CONNECTION_STATE,
+        std::memory_order_relaxed
+    );
+    encryptedConnectionState.store(
+        NO_CONNECTION_STATE,
+        std::memory_order_relaxed
+    );
+    activeConnectionState.store(
+        encodeConnectionState(++connectionGeneration, connectionHandle),
         std::memory_order_release
     );
-    connectionSession.fetch_add(1, std::memory_order_acq_rel);
 }
 
-void requestAncsSetup(uint16_t connectionHandle)
+void endConnectionSession(uint16_t connectionHandle)
 {
-    const uint32_t session = connectionSession.load(
+    const uint32_t currentState = activeConnectionState.load(
         std::memory_order_acquire
     );
-    if (
-        activeConnectionHandle.load(std::memory_order_acquire)
-            != connectionHandle
-    ) {
+    if (connectionHandleFromState(currentState) != connectionHandle) {
         return;
     }
 
-    ancsSetupRequestHandle.store(
-        connectionHandle,
+    readyConnectionState.store(
+        NO_CONNECTION_STATE,
         std::memory_order_relaxed
     );
-    ancsSetupRequestSession.store(session, std::memory_order_relaxed);
-    ancsSetupRequested.store(true, std::memory_order_release);
+    encryptedConnectionState.store(
+        NO_CONNECTION_STATE,
+        std::memory_order_relaxed
+    );
+    activeConnectionState.store(
+        encodeConnectionState(
+            ++connectionGeneration,
+            BLE_CONN_HANDLE_INVALID
+        ),
+        std::memory_order_release
+    );
 }
 
-void resetManagedAncsState(uint32_t session, uint16_t connectionHandle)
+bool connectionStateMatches(uint32_t expectedState)
 {
-    managedConnectionSession = session;
-    managedConnectionHandle = connectionHandle;
-    ancsSetupActive = false;
-    serviceChangedSubscribed = false;
-    ancsSetupAttemptCount = 0;
-    nextAncsSetupAt = 0;
+    return activeConnectionState.load(std::memory_order_acquire)
+        == expectedState;
 }
 
-bool ensureServiceChangedSubscription(
-    uint32_t session,
-    uint16_t connectionHandle
+void requestAncsRecoveryReconnect(
+    uint32_t connectionState,
+    const __FlashStringHelper *reason
 )
 {
-    if (serviceChangedSubscribed) {
-        return true;
-    }
+    ancsSetupState = AncsSetupState::Failed;
+    Serial.print(F("[ANCS] Setup failed: "));
+    Serial.println(reason);
 
-    Serial.print(F("[GATT] Discovering Service Changed indication... "));
-
-    if (
-        !genericAttributeService.discovered()
-        && !genericAttributeService.discover(connectionHandle)
-    ) {
-        Serial.println(F("service not found"));
-        return false;
-    }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        Serial.println(F("canceled; disconnected"));
-        return false;
-    }
-
-    if (
-        !serviceChangedCharacteristic.discovered()
-        && !serviceChangedCharacteristic.discover()
-    ) {
-        Serial.println(F("characteristic not found"));
-        return false;
-    }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        Serial.println(F("canceled; disconnected"));
-        return false;
-    }
-
-    if (!serviceChangedCharacteristic.enableIndicate()) {
-        Serial.println(F("subscription failed"));
-        return false;
-    }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        Serial.println(F("canceled; disconnected"));
-        return false;
-    }
-
-    serviceChangedSubscribed = true;
-    Serial.println(F("enabled"));
-    return true;
-}
-
-AncsSetupResult attemptAncsSetup(
-    uint32_t session,
-    uint16_t connectionHandle
-)
-{
-    if (ancsCacheDirty.load(std::memory_order_acquire)) {
-        Serial.println(F("[ANCS] Cached discovery state needs cleanup"));
-        return AncsSetupResult::Reconnect;
-    }
-
-    if (!ensureServiceChangedSubscription(session, connectionHandle)) {
-        if (!connectionSessionMatches(session, connectionHandle)) {
-            return AncsSetupResult::Stale;
+    const uint16_t connectionHandle = connectionHandleFromState(
+        connectionState
+    );
+    ancsClient.prepareForDisconnectCleanup(connectionHandle);
+    if (ancsSetupAttemptCount >= ANCS_MAX_SETUP_ATTEMPTS) {
+        if (!connectionStateMatches(connectionState)) {
+            cleanupOnNextConnection = true;
+            cleanupDisconnectAttemptCount = 0;
+            cleanupDisconnectRetryAt = 0;
         }
-        Serial.println(F("[GATT] Continuing with timed ANCS discovery fallback"));
+        Serial.println(F("[ANCS] Retry limit reached; send R and Enter"));
+        signalBleError();
+        return;
     }
 
-    Serial.print(F("[ANCS] Setup attempt "));
+    Serial.print(F("[ANCS] Reconnecting for retry "));
     Serial.print(ancsSetupAttemptCount + 1);
     Serial.print('/');
-    Serial.println(ANCS_SETUP_MAX_ATTEMPTS);
-
-    if (!ancsPresenceProbe.discovered()) {
-        Serial.print(F("[ANCS] Checking whether iOS published ANCS... "));
-        if (!ancsPresenceProbe.discover(connectionHandle)) {
-            if (!connectionSessionMatches(session, connectionHandle)) {
-                Serial.println(F("canceled; disconnected"));
-                return AncsSetupResult::Stale;
-            }
-            Serial.println(F("not available yet"));
-            return AncsSetupResult::Retry;
-        }
-        Serial.println(F("published"));
+    Serial.println(ANCS_MAX_SETUP_ATTEMPTS);
+    cleanupOnNextConnection = true;
+    cleanupDisconnectAttemptCount = 0;
+    cleanupDisconnectRetryAt = 0;
+    if (!connectionStateMatches(connectionState)) {
+        // The disconnect already happened while discovery was blocked. Use
+        // one short connection only to let Bluefruit clean stale child handles.
+        Serial.println(F("[ANCS] Cleanup queued for the next connection"));
     }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        return AncsSetupResult::Stale;
-    }
-
-    if (!ancsClient.discovered()) {
-        Serial.print(F("[ANCS] Discovering service characteristics... "));
-        ancsCacheDirty.store(true, std::memory_order_release);
-        if (!ancsClient.discover(connectionHandle)) {
-            if (!connectionSessionMatches(session, connectionHandle)) {
-                Serial.println(F("canceled; disconnected"));
-                return AncsSetupResult::Stale;
-            }
-
-            // BLEAncs can retain partial private characteristic handles after
-            // a failed discovery. The recovery disconnect below exposes the
-            // parent handle long enough for Bluefruit to clear those children.
-            Serial.println(F("incomplete"));
-            return AncsSetupResult::Reconnect;
-        }
-        Serial.println(F("found"));
-
-        if (
-            !connectionSessionMatches(session, connectionHandle)
-            || !Bluefruit.connected(connectionHandle)
-        ) {
-            return AncsSetupResult::Stale;
-        }
-        ancsCacheDirty.store(false, std::memory_order_release);
-    }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        return AncsSetupResult::Stale;
-    }
-
-    Serial.print(F("[ANCS] Enabling Notification Source and Data Source... "));
-    if (!ancsClient.enableNotification()) {
-        if (!connectionSessionMatches(session, connectionHandle)) {
-            Serial.println(F("canceled; disconnected"));
-            return AncsSetupResult::Stale;
-        }
-        Serial.println(F("failed"));
-        return AncsSetupResult::Retry;
-    }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        Serial.println(F("canceled; disconnected"));
-        return AncsSetupResult::Stale;
-    }
-
-    Serial.println(F("enabled"));
-    return AncsSetupResult::Ready;
 }
 
-void completeAncsCleanup()
+void updateCleanupDisconnect(
+    uint32_t connectionState,
+    unsigned long now
+)
 {
-    bool expectedArmed = true;
-    if (!ancsCleanupArmed.compare_exchange_strong(
-            expectedArmed,
-            false,
-            std::memory_order_acq_rel
-        )) {
+    if (
+        !cleanupOnNextConnection
+        || recoveryDisconnectExpected
+        || static_cast<long>(now - cleanupDisconnectRetryAt) < 0
+        || notificationProcessing.load(std::memory_order_acquire)
+    ) {
         return;
     }
 
-    ancsCacheDirty.store(false, std::memory_order_release);
-    ancsCleanupProgress.store(0, std::memory_order_release);
-    Serial.println(F("[ANCS] Cached discovery state cleared"));
-}
-
-bool requestAncsRecoveryReconnect(
-    uint32_t session,
-    uint16_t connectionHandle
-)
-{
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        return false;
+    const uint16_t connectionHandle = connectionHandleFromState(
+        connectionState
+    );
+    if (
+        connectionHandle == BLE_CONN_HANDLE_INVALID
+        || !connectionStateMatches(connectionState)
+    ) {
+        return;
+    }
+    if (
+        cleanupDisconnectAttemptCount
+            >= CLEANUP_DISCONNECT_MAX_ATTEMPTS
+    ) {
+        return;
     }
 
-    Serial.println(F("[ANCS] Restarting the BLE session to reset discovery state"));
-    const uint16_t previousAncsConnectionHandle = ancsClient.connHandle();
-    ancsCleanupArmed.store(false, std::memory_order_release);
-    ancsClient.setConnectionHandleForCleanup(connectionHandle);
-    ancsCacheDirty.store(true, std::memory_order_release);
-    ancsCleanupSession.store(session, std::memory_order_relaxed);
-    ancsCleanupConnectionHandle.store(
-        connectionHandle,
-        std::memory_order_relaxed
-    );
-    ancsCleanupProgress.store(0, std::memory_order_relaxed);
-    ancsCleanupArmed.store(true, std::memory_order_release);
-
-    const uint32_t disconnectResult = sd_ble_gap_disconnect(
+    ancsClient.prepareForDisconnectCleanup(connectionHandle);
+    ++cleanupDisconnectAttemptCount;
+    recoveryDisconnectExpected = true;
+    const uint32_t result = sd_ble_gap_disconnect(
         connectionHandle,
         BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION
     );
-    if (disconnectResult == NRF_SUCCESS) {
-        const uint8_t previousProgress = ancsCleanupProgress.fetch_or(
-            ANCS_CLEANUP_DISCONNECT_ACCEPTED,
-            std::memory_order_acq_rel
-        );
-        if (previousProgress & ANCS_CLEANUP_DISCONNECT_OBSERVED) {
-            completeAncsCleanup();
-        }
-        ancsSetupActive = false;
-        return true;
-    }
-
-    // Keep the parent handle exposed: INVALID_STATE can mean a peer-initiated
-    // disconnect is already in progress, and that event can still clean up.
-    Serial.print(F("[ANCS] Cleanup disconnect not started; result "));
-    Serial.println(disconnectResult);
-    if (
-        disconnectResult != NRF_ERROR_INVALID_STATE
-        && disconnectResult != BLE_ERROR_INVALID_CONN_HANDLE
-    ) {
-        signalBleError();
-    }
-
-    if (!connectionSessionMatches(session, connectionHandle)) {
-        ancsClient.setConnectionHandleForCleanup(
-            previousAncsConnectionHandle
-        );
-    }
-    return false;
-}
-
-void scheduleNextAncsSetupAttempt(
-    unsigned long now,
-    uint32_t session,
-    uint16_t connectionHandle
-)
-{
-    ++ancsSetupAttemptCount;
-    if (ancsSetupAttemptCount >= ANCS_SETUP_MAX_ATTEMPTS) {
-        if (
-            !ancsPresenceProbe.discovered()
-            && !ancsClient.discovered()
-            && !ancsCacheDirty.load(std::memory_order_acquire)
-        ) {
-            ancsSetupAttemptCount = ANCS_SETUP_MAX_ATTEMPTS - 1;
-            nextAncsSetupAt = now + ANCS_SETUP_SLOW_RETRY_MS;
-            Serial.println(F("[ANCS] Still unavailable; staying connected"));
-            Serial.print(F("[ANCS] Slow discovery retry in "));
-            Serial.print(ANCS_SETUP_SLOW_RETRY_MS);
-            Serial.println(F(" ms"));
-            return;
-        }
-
-        Serial.println(F("[ANCS] Setup did not complete; resetting cached state"));
-        if (!requestAncsRecoveryReconnect(session, connectionHandle)) {
-            ancsSetupAttemptCount = ANCS_SETUP_MAX_ATTEMPTS - 1;
-            nextAncsSetupAt = now
-                + ANCS_SETUP_RETRY_DELAYS_MS[
-                    ANCS_SETUP_RETRY_DELAY_COUNT - 1
-                ];
-        }
+    if (result == NRF_SUCCESS) {
+        cleanupDisconnectAttemptCount = 0;
         return;
     }
 
-    const unsigned long retryDelay =
-        ANCS_SETUP_RETRY_DELAYS_MS[ancsSetupAttemptCount - 1];
-    nextAncsSetupAt = now + retryDelay;
-    Serial.print(F("[ANCS] Will retry in "));
-    Serial.print(retryDelay);
-    Serial.println(F(" ms"));
+    recoveryDisconnectExpected = false;
+    cleanupDisconnectRetryAt = now + CLEANUP_DISCONNECT_RETRY_DELAY_MS;
+    Serial.print(F("[ANCS] Cleanup disconnect attempt failed: "));
+    Serial.println(result);
+    if (
+        cleanupDisconnectAttemptCount
+            >= CLEANUP_DISCONNECT_MAX_ATTEMPTS
+    ) {
+        Serial.println(F("[ANCS] Disconnect retry limit reached; send R and Enter"));
+        signalBleError();
+    }
+}
+
+void startManagedConnection(
+    uint32_t connectionState,
+    unsigned long now
+)
+{
+    managedConnectionState = connectionState;
+    ancsSetupState = AncsSetupState::Idle;
+    nextAncsSetupAt = 0;
+
+    const uint16_t connectionHandle = connectionHandleFromState(
+        connectionState
+    );
+    if (connectionHandle == BLE_CONN_HANDLE_INVALID) {
+        if (recoveryDisconnectExpected) {
+            cleanupOnNextConnection = false;
+            cleanupDisconnectAttemptCount = 0;
+        } else {
+            ancsSetupAttemptCount = 0;
+        }
+        recoveryDisconnectExpected = false;
+        diagnostics::setLed(LED_GREEN, false);
+        immediateSearchLedPending.store(true, std::memory_order_release);
+        advertisingRestartPending = true;
+        advertisingRestartAt = now + ADVERTISING_RESTART_DELAY_MS;
+        Serial.println();
+        Serial.println(F("[BLE] Disconnected; advertising restarts in 2 seconds"));
+        return;
+    }
+
+    advertisingRestartPending = false;
+    diagnostics::setLed(LED_GREEN, true);
+    Serial.println();
+    Serial.print(F("[BLE] Connected on handle "));
+    Serial.println(connectionHandle);
+
+    if (cleanupOnNextConnection) {
+        Serial.println(F("[ANCS] Running one cleanup-only connection"));
+        cleanupDisconnectAttemptCount = 0;
+        cleanupDisconnectRetryAt = now;
+        return;
+    }
+
+    const uint32_t txPowerResult = sd_ble_gap_tx_power_set(
+        BLE_GAP_TX_POWER_ROLE_CONN,
+        connectionHandle,
+        TX_POWER_DBM
+    );
+    if (
+        txPowerResult != NRF_SUCCESS
+        && txPowerResult != BLE_ERROR_INVALID_CONN_HANDLE
+    ) {
+        Serial.println(F("[BLE] Could not set connection TX power"));
+        signalBleError();
+    }
+
+    Serial.println(F("[SEC] Requesting bonded Just Works pairing"));
+    Serial.println(F("[SEC] Accept the Pair request on the iPhone"));
+    if (!Bluefruit.Security._authenticate(connectionHandle)) {
+        Serial.println(F("[SEC] Pairing is already active or link is secured"));
+    }
 }
 
 void updateAncsSetup(unsigned long now)
 {
-    const uint32_t session = connectionSession.load(
+    const uint32_t connectionState = activeConnectionState.load(
         std::memory_order_acquire
     );
-    const uint16_t connectionHandle = activeConnectionHandle.load(
-        std::memory_order_acquire
+    if (connectionState != managedConnectionState) {
+        startManagedConnection(connectionState, now);
+    }
+
+    const uint16_t connectionHandle = connectionHandleFromState(
+        connectionState
     );
-
-    if (
-        session != managedConnectionSession
-        || connectionHandle != managedConnectionHandle
-    ) {
-        resetManagedAncsState(session, connectionHandle);
+    if (connectionHandle == BLE_CONN_HANDLE_INVALID) {
+        return;
     }
-
-    if (ancsSetupRequested.exchange(false, std::memory_order_acq_rel)) {
-        const uint32_t requestedSession = ancsSetupRequestSession.load(
-            std::memory_order_relaxed
-        );
-        const uint16_t requestedHandle = ancsSetupRequestHandle.load(
-            std::memory_order_relaxed
-        );
-        if (
-            requestedSession == session
-            && requestedHandle == connectionHandle
-            && !ancsReady.load(std::memory_order_acquire)
-        ) {
-            ancsSetupActive = true;
-            ancsSetupAttemptCount = 0;
-            nextAncsSetupAt = now + ANCS_SETUP_INITIAL_DELAY_MS;
-            Serial.println(F("[ANCS] Discovery scheduled after encryption"));
-        }
-    }
-
-    if (serviceChangedPending.exchange(false, std::memory_order_acq_rel)) {
-        const uint32_t changedSession = serviceChangedSession.load(
-            std::memory_order_relaxed
-        );
-        const uint16_t changedConnectionHandle =
-            serviceChangedConnectionHandle.load(std::memory_order_relaxed);
-
-        if (
-            changedSession == session
-            && changedConnectionHandle == connectionHandle
-        ) {
-            Serial.print(F("[GATT] Service database changed, handles "));
-            Serial.print(
-                serviceChangedStartHandle.load(std::memory_order_relaxed)
-            );
-            Serial.print('-');
-            Serial.println(
-                serviceChangedEndHandle.load(std::memory_order_relaxed)
-            );
-
-            const bool wasReady = ancsReady.exchange(
-                false,
-                std::memory_order_acq_rel
-            );
-            const bool hasCachedAncsHandles =
-                ancsCacheDirty.load(std::memory_order_acquire)
-                || ancsPresenceProbe.discovered()
-                || ancsClient.discovered();
-            if (wasReady || hasCachedAncsHandles) {
-                if (
-                    !requestAncsRecoveryReconnect(
-                        session,
-                        connectionHandle
-                    )
-                ) {
-                    ancsSetupActive = true;
-                    nextAncsSetupAt = now + ANCS_SETUP_INITIAL_DELAY_MS;
-                }
-                return;
-            }
-
-            ancsSetupActive = true;
-            ancsSetupAttemptCount = 0;
-            nextAncsSetupAt = now;
-        }
-    }
-
-    if (
-        !ancsSetupActive
-        || connectionHandle == BLE_CONN_HANDLE_INVALID
-        || static_cast<long>(now - nextAncsSetupAt) < 0
-        || !connectionSessionMatches(session, connectionHandle)
-    ) {
+    if (cleanupOnNextConnection) {
+        updateCleanupDisconnect(connectionState, now);
         return;
     }
 
-    BLEConnection *connection = Bluefruit.Connection(connectionHandle);
     if (
-        connection == nullptr
-        || !connection->connected()
-        || !connection->secured()
+        ancsSetupState == AncsSetupState::Idle
+        && encryptedConnectionState.load(std::memory_order_acquire)
+            == connectionState
     ) {
-        nextAncsSetupAt = now + ANCS_SETUP_INITIAL_DELAY_MS;
-        return;
-    }
-
-    switch (attemptAncsSetup(session, connectionHandle)) {
-        case AncsSetupResult::Ready: {
-            BLEConnection *readyConnection = Bluefruit.Connection(
-                connectionHandle
-            );
-            if (
-                !connectionSessionMatches(session, connectionHandle)
-                || readyConnection == nullptr
-                || !readyConnection->connected()
-                || !readyConnection->secured()
-            ) {
-                break;
-            }
-            ancsSetupActive = false;
-            ancsReady.store(true, std::memory_order_release);
-            Serial.println(F("[ANCS] Ready for iOS notifications"));
-            requestLowPowerConnectionParameters(connectionHandle);
-            diagnostics::blinkLed(LED_BLUE, 3);
-            break;
-        }
-
-        case AncsSetupResult::Retry:
-            scheduleNextAncsSetupAttempt(now, session, connectionHandle);
-            break;
-
-        case AncsSetupResult::Reconnect:
-            if (!requestAncsRecoveryReconnect(session, connectionHandle)) {
-                scheduleNextAncsSetupAttempt(
-                    now,
-                    session,
-                    connectionHandle
-                );
-            }
-            break;
-
-        case AncsSetupResult::Stale:
-            break;
-    }
-}
-
-void updateConnectionSecurity(unsigned long now)
-{
-    const uint32_t session = connectionSession.load(
-        std::memory_order_acquire
-    );
-    const uint16_t connectionHandle = activeConnectionHandle.load(
-        std::memory_order_acquire
-    );
-
-    if (
-        session != securityConnectionSession
-        || connectionHandle != securityConnectionHandle
-    ) {
-        securityConnectionSession = session;
-        securityConnectionHandle = connectionHandle;
-        securitySetupRequested = false;
-        securityDisconnectPending = false;
-        securityStartedAt = now;
-        nextSecurityRetryAt = now + SECURITY_RETRY_DELAY_MS;
-    }
-
-    if (
-        connectionHandle == BLE_CONN_HANDLE_INVALID
-        || securityDisconnectPending
-        || !connectionSessionMatches(session, connectionHandle)
-    ) {
-        return;
-    }
-
-    BLEConnection *connection = Bluefruit.Connection(connectionHandle);
-    if (connection == nullptr || !connection->connected()) {
-        return;
-    }
-
-    if (connection->secured()) {
-        if (!securitySetupRequested) {
-            securitySetupRequested = true;
-            requestAncsSetup(connectionHandle);
-        }
-        return;
-    }
-
-    securitySetupRequested = false;
-
-    if (now - securityStartedAt >= SECURITY_TIMEOUT_MS) {
-        Serial.println(F("[SEC] Encryption timed out; restarting BLE session"));
-        const uint32_t result = sd_ble_gap_disconnect(
-            connectionHandle,
-            BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION
-        );
-        if (
-            result == NRF_SUCCESS
-            || result == NRF_ERROR_INVALID_STATE
-            || result == BLE_ERROR_INVALID_CONN_HANDLE
-        ) {
-            securityDisconnectPending = true;
+        if (ancsSetupAttemptCount >= ANCS_MAX_SETUP_ATTEMPTS) {
+            ancsSetupState = AncsSetupState::Failed;
+            Serial.println(F("[ANCS] Retry limit reached; send R and Enter"));
+            signalBleError();
             return;
         }
 
-        Serial.print(F("[SEC] Could not restart BLE session; result "));
-        Serial.println(result);
-        signalBleError();
-        securityStartedAt = now;
-        nextSecurityRetryAt = now + SECURITY_RETRY_DELAY_MS;
+        ancsSetupState = AncsSetupState::Waiting;
+        nextAncsSetupAt = now + ANCS_RECONNECT_DELAY_MS;
+        Serial.println(F("[SEC] Link encrypted"));
+        Serial.println(F("[ANCS] Waiting 5 seconds before setup"));
+    }
+
+    if (
+        ancsSetupState != AncsSetupState::Waiting
+        || static_cast<long>(now - nextAncsSetupAt) < 0
+        || notificationProcessing.load(std::memory_order_acquire)
+        || !connectionStateMatches(connectionState)
+    ) {
         return;
     }
 
-    if (static_cast<long>(now - nextSecurityRetryAt) < 0) {
-        return;
+    // Mark the attempt before entering blocking library calls. Recovery uses
+    // a fresh BLE connection rather than retrying stale handles in place.
+    ancsSetupState = AncsSetupState::Failed;
+    ++ancsSetupAttemptCount;
+
+    Serial.print(F("[ANCS] Discovering after reconnect delay... "));
+    if (!ancsClient.discovered()) {
+        const bool discovered = ancsClient.discover(connectionHandle);
+        if (!connectionStateMatches(connectionState)) {
+            requestAncsRecoveryReconnect(
+                connectionState,
+                F("discovery was interrupted")
+            );
+            return;
+        }
+        if (!discovered) {
+            Serial.println(F("failed"));
+            requestAncsRecoveryReconnect(
+                connectionState,
+                F("characteristic discovery failed")
+            );
+            return;
+        }
     }
-
-    nextSecurityRetryAt = now + SECURITY_RETRY_DELAY_MS;
-    Serial.println(F("[SEC] Link is not encrypted; retrying security"));
-    if (!connection->requestPairing()) {
-        Serial.println(F("[SEC] Security procedure is busy; will check again"));
-    }
-}
-
-void printConnectionParameters(BLEConnection *connection)
-{
-    Serial.print(F("[BLE] Link interval: "));
-    Serial.print(connection->getConnectionInterval() * 1.25F, 2);
-    Serial.print(F(" ms, latency: "));
-    Serial.print(connection->getSlaveLatency());
-    Serial.print(F(", supervision timeout: "));
-    Serial.print(connection->getSupervisionTimeout() * 10);
-    Serial.println(F(" ms"));
-}
-
-bool connectionUsesLowPowerParameters(BLEConnection *connection)
-{
-    const uint16_t interval = connection->getConnectionInterval();
-    return interval >= CONNECTION_INTERVAL_MIN_UNITS
-        && interval <= CONNECTION_INTERVAL_MAX_UNITS
-        && connection->getSlaveLatency() == CONNECTION_SLAVE_LATENCY
-        && connection->getSupervisionTimeout()
-            == CONNECTION_SUPERVISION_TIMEOUT_UNITS;
-}
-
-void submitLowPowerConnectionParameters(
-    uint16_t connectionHandle,
-    bool allowBusyRetry
-)
-{
-    // Apple devices do not use the GAP Peripheral Preferred Connection
-    // Parameters characteristic, so request the same Apple-valid range once
-    // after ANCS setup. The phone remains free to reject or replace it.
-    ble_gap_conn_params_t parameters = {};
-    parameters.min_conn_interval = CONNECTION_INTERVAL_MIN_UNITS;
-    parameters.max_conn_interval = CONNECTION_INTERVAL_MAX_UNITS;
-    parameters.slave_latency = CONNECTION_SLAVE_LATENCY;
-    parameters.conn_sup_timeout = CONNECTION_SUPERVISION_TIMEOUT_UNITS;
-
-    const uint32_t result = sd_ble_gap_conn_param_update(
-        connectionHandle,
-        &parameters
-    );
-    if (result == NRF_ERROR_BUSY && allowBusyRetry) {
-        Serial.println(F("[BLE] Link request busy; one retry scheduled"));
-        connectionParameterRetryHandle = connectionHandle;
-        connectionParameterRetryAt = millis()
-            + CONNECTION_PARAMETER_RETRY_DELAY_MS;
-        connectionParameterRetryPending.store(
-            true,
-            std::memory_order_release
+    if (!connectionStateMatches(connectionState)) {
+        requestAncsRecoveryReconnect(
+            connectionState,
+            F("discovery was interrupted")
         );
         return;
     }
+    Serial.println(F("found"));
 
-    if (
-        result == NRF_ERROR_INVALID_STATE
-        || result == BLE_ERROR_INVALID_CONN_HANDLE
-    ) {
-        Serial.println(F("[BLE] Low-power link request canceled; disconnected"));
+    Serial.print(F("[ANCS] Enabling notification sources... "));
+    if (!ancsClient.enableNotification()) {
+        if (!connectionStateMatches(connectionState)) {
+            return;
+        }
+        Serial.println(F("failed"));
+        requestAncsRecoveryReconnect(
+            connectionState,
+            F("notification subscription failed")
+        );
+        return;
+    }
+    if (!connectionStateMatches(connectionState)) {
         return;
     }
 
-    if (result != NRF_SUCCESS) {
-        Serial.print(F("[BLE] Low-power link request failed: "));
-        Serial.println(result);
-        signalBleError();
-        return;
-    }
-
-    Serial.println(F("[BLE] Low-power link parameters requested"));
-    connectionParameterReportHandle = connectionHandle;
-    connectionParameterReportAt = millis()
-        + CONNECTION_PARAMETER_REPORT_DELAY_MS;
-    connectionParameterReportPending.store(
-        true,
+    Serial.println(F("enabled"));
+    Serial.println(F("[ANCS] Ready for iOS notifications"));
+    ancsSetupState = AncsSetupState::Ready;
+    readyConnectionState.store(
+        connectionState,
         std::memory_order_release
     );
-}
-
-void requestLowPowerConnectionParameters(uint16_t connectionHandle)
-{
-    if (
-        lowPowerParameterRequestSent.exchange(
-            true,
-            std::memory_order_acq_rel
-        )
-    ) {
-        return;
-    }
-    submitLowPowerConnectionParameters(connectionHandle, true);
+    ancsSetupAttemptCount = 0;
+    diagnostics::blinkLed(LED_BLUE, 3);
 }
 
 uint8_t chargeLevelForPercentage(uint8_t percentage)
@@ -945,7 +590,7 @@ void startAdvertising()
     }
 
     Bluefruit.ScanResponse.addName();
-    Bluefruit.Advertising.restartOnDisconnect(true);
+    Bluefruit.Advertising.restartOnDisconnect(false);
 
     // Apple recommends an exact 20 ms fast interval, followed by one of its
     // listed slow intervals. 1022.5 ms is the battery-constrained choice.
@@ -965,116 +610,79 @@ void startAdvertising()
     Serial.println(F("[BLE] Open iOS Settings > Bluetooth and select Notifense"));
 }
 
-void connectCallback(uint16_t connectionHandle)
+void bleEventCallback(ble_evt_t *event)
 {
-    beginConnectionSession(connectionHandle);
-    lowPowerParameterRequestSent.store(false, std::memory_order_release);
-    connectionParameterRetryPending.store(false, std::memory_order_release);
-    connectionParameterReportPending.store(false, std::memory_order_release);
-
-    Serial.println();
-    Serial.print(F("[BLE] Connected on handle "));
-    Serial.println(connectionHandle);
-    diagnostics::setLed(LED_GREEN, true);
-
-    BLEConnection *connection = Bluefruit.Connection(connectionHandle);
-    if (connection == nullptr) {
-        Serial.println(F("[BLE] Connection object is unavailable"));
-        signalBleError();
+    if (event == nullptr) {
         return;
     }
 
-    if (!connection->setTxPower(TX_POWER_DBM)) {
-        Serial.println(F("[BLE] Could not set connection TX power"));
-        signalBleError();
-    }
-    printConnectionParameters(connection);
+    const uint16_t connectionHandle = event->evt.common_evt.conn_handle;
+    switch (event->header.evt_id) {
+        case BLE_GAP_EVT_CONNECTED:
+            beginConnectionSession(connectionHandle);
+            return;
 
-    Serial.println(F("[ANCS] Discovery will begin after link encryption"));
-    Serial.println(F("[SEC] Restoring bond or requesting Just Works pairing"));
-    Serial.println(F("[SEC] Accept the Pair request on the iPhone if prompted"));
-    if (!connection->requestPairing()) {
-        // INVALID_STATE can mean the iPhone already started encryption.
-        Serial.println(F("[SEC] Pairing request busy; waiting for security update"));
-    } else if (connection->secured()) {
-        requestAncsSetup(connectionHandle);
+        case BLE_GAP_EVT_DISCONNECTED:
+            endConnectionSession(connectionHandle);
+            immediateSearchLedPending.store(true, std::memory_order_release);
+            return;
+
+        case BLE_GAP_EVT_CONN_SEC_UPDATE: {
+            const uint32_t connectionState = activeConnectionState.load(
+                std::memory_order_acquire
+            );
+            if (
+                connectionHandleFromState(connectionState)
+                    != connectionHandle
+            ) {
+                return;
+            }
+
+            const ble_gap_conn_sec_mode_t &securityMode =
+                event->evt.gap_evt.params.conn_sec_update.conn_sec.sec_mode;
+            const bool secured = !(
+                securityMode.sm == 1
+                && securityMode.lv == 1
+            );
+            encryptedConnectionState.store(
+                secured ? connectionState : NO_CONNECTION_STATE,
+                std::memory_order_release
+            );
+            return;
+        }
+
+        default:
+            return;
     }
 }
 
-void disconnectCallback(uint16_t connectionHandle, uint8_t reason)
+void updateAdvertisingRestart(unsigned long now)
 {
-    Serial.println();
-    Serial.print(F("[BLE] Disconnected handle "));
-    Serial.print(connectionHandle);
-    Serial.print(F("; reason 0x"));
-    diagnostics::printHexByte(reason);
-    Serial.println();
-    Serial.println(F("[BLE] Advertising will restart automatically"));
-    diagnostics::setLed(LED_GREEN, false);
-
     if (
-        ancsCleanupArmed.load(std::memory_order_acquire)
-        && ancsCleanupSession.load(std::memory_order_relaxed)
-            == connectionSession.load(std::memory_order_acquire)
-        && ancsCleanupConnectionHandle.load(std::memory_order_relaxed)
-            == connectionHandle
+        !advertisingRestartPending
+        || static_cast<long>(now - advertisingRestartAt) < 0
     ) {
-        const uint8_t previousProgress = ancsCleanupProgress.fetch_or(
-            ANCS_CLEANUP_DISCONNECT_OBSERVED,
-            std::memory_order_acq_rel
-        );
-        if (previousProgress & ANCS_CLEANUP_DISCONNECT_ACCEPTED) {
-            // Bluefruit completes client cleanup before this deferred
-            // callback runs. The handshake also covers a callback that beats
-            // the loop task after sd_ble_gap_disconnect() returns.
-            completeAncsCleanup();
-        }
+        return;
     }
 
-    endConnectionSession();
-    lowPowerParameterRequestSent.store(false, std::memory_order_release);
-    connectionParameterRetryPending.store(false, std::memory_order_release);
-    connectionParameterReportPending.store(false, std::memory_order_release);
-    immediateSearchLedPending.store(true, std::memory_order_release);
-}
-
-void pairingCompleteCallback(uint16_t connectionHandle, uint8_t authStatus)
-{
-    Serial.print(F("[SEC] Pairing result on handle "));
-    Serial.print(connectionHandle);
-    Serial.print(F(": 0x"));
-    diagnostics::printHexByte(authStatus);
-
-    if (authStatus == BLE_GAP_SEC_STATUS_SUCCESS) {
-        Serial.println(F(" (success; bond keys saved in internal flash)"));
-        diagnostics::setLed(LED_GREEN, true);
-    } else {
-        Serial.println(F(" (failed)"));
-        Serial.println(F("[SEC] Forget the device on iPhone, send C while disconnected, and retry"));
-        signalBleError();
+    advertisingRestartPending = false;
+    if (
+        connectionHandleFromState(
+            activeConnectionState.load(std::memory_order_acquire)
+        ) != BLE_CONN_HANDLE_INVALID
+    ) {
+        return;
     }
-}
 
-void connectionSecuredCallback(uint16_t connectionHandle)
-{
-    BLEConnection *connection = Bluefruit.Connection(connectionHandle);
-    if (connection == nullptr) {
-        Serial.println(F("[SEC] Secured callback has no connection object"));
+    if (!Bluefruit.Advertising.start(0)) {
+        advertisingRestartPending = true;
+        advertisingRestartAt = now + ADVERTISING_RESTART_DELAY_MS;
+        Serial.println(F("[BLE] Advertising restart failed; retrying in 2 seconds"));
         signalBleError();
         return;
     }
 
-    if (!connection->secured()) {
-        Serial.println(F("[SEC] Stored key was rejected; requesting a fresh pairing"));
-        if (!connection->requestPairing()) {
-            Serial.println(F("[SEC] Recovery pairing request busy; waiting for security update"));
-        }
-        return;
-    }
-
-    Serial.println(F("[SEC] Link encrypted"));
-    printConnectionParameters(connection);
-    requestAncsSetup(connectionHandle);
+    Serial.println(F("[BLE] Advertising restarted"));
 }
 
 void notificationCallback(AncsNotification_t *notification)
@@ -1083,45 +691,29 @@ void notificationCallback(AncsNotification_t *notification)
         return;
     }
 
-    diagnostics::blinkLed(LED_BLUE, 2);
-    notificationProcessor::processNotification(ancsClient, notification);
-}
-
-void serviceChangedCallback(
-    BLEClientCharacteristic *characteristic,
-    uint8_t *data,
-    uint16_t length
-)
-{
-    if (characteristic == nullptr || data == nullptr || length != 4) {
-        return;
-    }
-
-    const uint16_t connectionHandle = characteristic->connHandle();
-    const uint32_t session = connectionSession.load(
+    const uint32_t connectionState = activeConnectionState.load(
         std::memory_order_acquire
     );
     if (
-        connectionHandle == BLE_CONN_HANDLE_INVALID
-        || activeConnectionHandle.load(std::memory_order_acquire)
-            != connectionHandle
+        connectionHandleFromState(connectionState) == BLE_CONN_HANDLE_INVALID
+        || readyConnectionState.load(std::memory_order_acquire)
+            != connectionState
     ) {
         return;
     }
 
-    const uint16_t startHandle = static_cast<uint16_t>(data[0])
-        | static_cast<uint16_t>(data[1]) << 8;
-    const uint16_t endHandle = static_cast<uint16_t>(data[2])
-        | static_cast<uint16_t>(data[3]) << 8;
-
-    serviceChangedStartHandle.store(startHandle, std::memory_order_relaxed);
-    serviceChangedEndHandle.store(endHandle, std::memory_order_relaxed);
-    serviceChangedConnectionHandle.store(
-        connectionHandle,
-        std::memory_order_relaxed
-    );
-    serviceChangedSession.store(session, std::memory_order_relaxed);
-    serviceChangedPending.store(true, std::memory_order_release);
+    notificationProcessing.store(true, std::memory_order_release);
+    if (
+        !connectionStateMatches(connectionState)
+        || readyConnectionState.load(std::memory_order_acquire)
+            != connectionState
+    ) {
+        notificationProcessing.store(false, std::memory_order_release);
+        return;
+    }
+    diagnostics::blinkLed(LED_BLUE, 2);
+    notificationProcessor::processNotification(ancsClient, notification);
+    notificationProcessing.store(false, std::memory_order_release);
 }
 
 } // namespace
@@ -1155,38 +747,22 @@ void begin()
     // Explicitly select Just Works capabilities. Bonding is enabled by default
     // and the Bluefruit stack stores the generated keys in InternalFS.
     Bluefruit.Security.setIOCaps(false, false, false);
-    Bluefruit.Security.setPairCompleteCallback(pairingCompleteCallback);
-    Bluefruit.Security.setSecuredCallback(connectionSecuredCallback);
-
-    Bluefruit.Periph.setConnectCallback(connectCallback);
-    Bluefruit.Periph.setDisconnectCallback(disconnectCallback);
+    Bluefruit.setEventCallback(bleEventCallback);
 
     beginBatteryService();
-
-    if (!genericAttributeService.begin()) {
-        diagnostics::fatalError(F("GATT client initialization failed"));
-    }
-    serviceChangedCharacteristic.begin(&genericAttributeService);
-    serviceChangedCharacteristic.setIndicateCallback(
-        serviceChangedCallback,
-        false
-    );
 
     if (!ancsClient.begin()) {
         diagnostics::fatalError(F("ANCS client initialization failed"));
     }
     ancsClient.setNotificationCallback(notificationCallback);
 
-    if (!ancsPresenceProbe.begin()) {
-        diagnostics::fatalError(F("ANCS presence probe initialization failed"));
-    }
-
     Serial.print(F("[BLE] Device name: "));
     Serial.println(DEVICE_NAME);
     Serial.println(F("[BLE] Preferred link: 150-165 ms, latency 4, timeout 6000 ms"));
     Serial.println(F("[BLE] TX power: 0 dBm"));
-    Serial.println(F("[SEC] Bond keys persist across reset"));
-    Serial.println(F("[SEC] Send C while disconnected to clear the device bond store"));
+    Serial.println(F("[SEC] Bond keys persist across BLE reconnects and power cycles"));
+    Serial.println(F("[SEC] Send C then Enter while disconnected to clear bonds"));
+    Serial.println(F("[ANCS] Send R then Enter for a clean BLE retry"));
 
     startAdvertising();
     const unsigned long now = millis();
@@ -1198,42 +774,8 @@ void update()
 {
     const unsigned long now = millis();
     updateBatteryService(now);
-    updateConnectionSecurity(now);
     updateAncsSetup(now);
-
-    if (
-        connectionParameterRetryPending.load(std::memory_order_acquire)
-        && static_cast<long>(now - connectionParameterRetryAt) >= 0
-    ) {
-        connectionParameterRetryPending.store(
-            false,
-            std::memory_order_release
-        );
-        submitLowPowerConnectionParameters(
-            connectionParameterRetryHandle,
-            false
-        );
-    }
-
-    if (
-        connectionParameterReportPending.load(std::memory_order_acquire)
-        && static_cast<long>(now - connectionParameterReportAt) >= 0
-    ) {
-        connectionParameterReportPending.store(
-            false,
-            std::memory_order_release
-        );
-        BLEConnection *connection = Bluefruit.Connection(
-            connectionParameterReportHandle
-        );
-        if (connection != nullptr && connection->connected()) {
-            Serial.println(F("[BLE] Link state after low-power request:"));
-            printConnectionParameters(connection);
-            if (!connectionUsesLowPowerParameters(connection)) {
-                Serial.println(F("[BLE] Phone selected different parameters; not retrying"));
-            }
-        }
-    }
+    updateAdvertisingRestart(now);
 
     if (static_cast<long>(now - nextLowBatteryLedAt) >= 0) {
         nextLowBatteryLedAt = now + LOW_BATTERY_LED_INTERVAL_MS;
@@ -1259,7 +801,11 @@ void update()
     ) {
         nextStatusAt = now + SEARCH_LED_INTERVAL_MS;
 
-        if (!Bluefruit.connected()) {
+        if (
+            connectionHandleFromState(
+                activeConnectionState.load(std::memory_order_acquire)
+            ) == BLE_CONN_HANDLE_INVALID
+        ) {
             Serial.println(F("[BLE] Advertising; waiting for iPhone connection"));
             diagnostics::blinkLed(
                 LED_BLUE,
@@ -1272,7 +818,11 @@ void update()
 
 void clearBonds()
 {
-    if (Bluefruit.connected()) {
+    if (
+        connectionHandleFromState(
+            activeConnectionState.load(std::memory_order_acquire)
+        ) != BLE_CONN_HANDLE_INVALID
+    ) {
         Serial.println(F("[SEC] Disconnect before clearing bonds"));
         return;
     }
@@ -1281,6 +831,31 @@ void clearBonds()
     Serial.println(F("[SEC] Device bond storage cleared"));
     Serial.println(F("[SEC] Also use Forget This Device on the iPhone before pairing again"));
     diagnostics::blinkLed(LED_RED, 2);
+}
+
+void retryAncsConnection()
+{
+    readyConnectionState.store(
+        NO_CONNECTION_STATE,
+        std::memory_order_release
+    );
+    ancsSetupAttemptCount = 0;
+    cleanupOnNextConnection = true;
+    cleanupDisconnectAttemptCount = 0;
+    cleanupDisconnectRetryAt = 0;
+    const uint32_t connectionState = activeConnectionState.load(
+        std::memory_order_acquire
+    );
+    const uint16_t connectionHandle = connectionHandleFromState(
+        connectionState
+    );
+    if (connectionHandle == BLE_CONN_HANDLE_INVALID) {
+        Serial.println(F("[ANCS] Cleanup armed; ANCS retries on the following connection"));
+        return;
+    }
+
+    Serial.println(F("[ANCS] Manual BLE reconnect requested"));
+    ancsSetupState = AncsSetupState::Failed;
 }
 
 } // namespace bleManager

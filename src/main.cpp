@@ -9,30 +9,82 @@ namespace {
 
 constexpr uint32_t SERIAL_BAUD = 9600;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
+constexpr size_t SERIAL_COMMAND_CAPACITY = 2;
+
+char serialCommand[SERIAL_COMMAND_CAPACITY] = {};
+size_t serialCommandLength = 0;
+bool discardSerialCommand = false;
 
 // Essential LEDs (searching, an error, and low battery) remain enabled.
 // Set this to true to restore all connection and notification feedback.
 constexpr bool ENABLE_OPTIONAL_LED_FEEDBACK = false;
 
-void restartDevice()
+void dispatchSerialCommand()
 {
-    Serial.println(F("[SYSTEM] Restarting..."));
-    Serial.flush();
-    delay(50);
-    NVIC_SystemReset();
+    if (serialCommandLength != 1) {
+        return;
+    }
+
+    switch (serialCommand[0]) {
+        case 'b':
+        case 'B':
+            batteryManager::reportStatus();
+            break;
+
+        case 'c':
+        case 'C':
+            bleManager::clearBonds();
+            break;
+
+        case 'r':
+        case 'R':
+            bleManager::retryAncsConnection();
+            break;
+
+        default:
+            break;
+    }
+}
+
+void finishSerialCommand()
+{
+    if (!discardSerialCommand && serialCommandLength > 0) {
+        dispatchSerialCommand();
+    }
+
+    serialCommandLength = 0;
+    discardSerialCommand = false;
 }
 
 void handleSerialCommands()
 {
     while (Serial.available() > 0) {
-        const char command = static_cast<char>(Serial.read());
-        if (command == 'c' || command == 'C') {
-            bleManager::clearBonds();
-        } else if (command == 'b' || command == 'B') {
-            batteryManager::reportStatus();
-        } else if (command == 'r' || command == 'R') {
-            restartDevice();
+        const int value = Serial.read();
+        if (value < 0) {
+            return;
         }
+
+        const char character = static_cast<char>(value);
+        if (character == '\r' || character == '\n') {
+            finishSerialCommand();
+            continue;
+        }
+
+        if (discardSerialCommand) {
+            continue;
+        }
+
+        const bool printable = character >= ' ' && character <= '~';
+        if (
+            !printable
+            || serialCommandLength + 1 >= SERIAL_COMMAND_CAPACITY
+        ) {
+            serialCommandLength = 0;
+            discardSerialCommand = true;
+            continue;
+        }
+
+        serialCommand[serialCommandLength++] = character;
     }
 }
 
@@ -52,6 +104,7 @@ void setup()
     Serial.println(F("========== Notifense ANCS v0 =========="));
     Serial.println(F("Adafruit Bluefruit + Nordic S140 SoftDevice"));
     Serial.println(F("ANCS notifications with DRV2605 haptic feedback"));
+    Serial.println(F("[SERIAL] Commands require Enter: B=battery, C=clear bonds, R=retry BLE"));
     diagnostics::blinkLed(LED_BLUE, 1);
 
     batteryManager::begin();

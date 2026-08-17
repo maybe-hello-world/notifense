@@ -99,7 +99,7 @@ void begin()
     analogReadResolution(ADC_BITS);
 
     Serial.println(F("[BATTERY] Charger configured for 50 mA"));
-    Serial.println(F("[BATTERY] Send B to report battery status"));
+    Serial.println(F("[BATTERY] Send B then Enter to report status"));
 }
 
 float readVoltage()
