@@ -10,6 +10,10 @@ namespace {
 constexpr uint32_t SERIAL_BAUD = 9600;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
 
+// Essential LEDs (searching, an error, and low battery) remain enabled.
+// Set this to true to restore all connection and notification feedback.
+constexpr bool ENABLE_OPTIONAL_LED_FEEDBACK = false;
+
 void restartDevice()
 {
     Serial.println(F("[SYSTEM] Restarting..."));
@@ -36,7 +40,7 @@ void handleSerialCommands()
 
 void setup()
 {
-    diagnostics::initializeStatusLeds();
+    diagnostics::initializeStatusLeds(ENABLE_OPTIONAL_LED_FEEDBACK);
 
     Serial.begin(SERIAL_BAUD);
     const unsigned long serialWaitStartedAt = millis();
@@ -58,6 +62,7 @@ void setup()
 void loop()
 {
     handleSerialCommands();
+    hapticManager::update();
     bleManager::update();
-    delay(10);
+    delay(100);
 }

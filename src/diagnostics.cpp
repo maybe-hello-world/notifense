@@ -4,37 +4,62 @@ namespace diagnostics {
 namespace {
 
 constexpr unsigned long LED_PULSE_MS = 90;
+bool optionalLedFeedbackEnabled = false;
 
-} // namespace
-
-void initializeStatusLeds()
-{
-    pinMode(LED_RED, OUTPUT);
-    pinMode(LED_GREEN, OUTPUT);
-    pinMode(LED_BLUE, OUTPUT);
-    turnLedsOff();
-}
-
-void setLed(uint8_t pin, bool on)
+void writeLed(uint8_t pin, bool on)
 {
     // The XIAO RGB LED channels are active-low.
     digitalWrite(pin, on ? LOW : HIGH);
 }
 
-void turnLedsOff()
+bool feedbackEnabled(LedFeedback feedback)
 {
-    setLed(LED_RED, false);
-    setLed(LED_GREEN, false);
-    setLed(LED_BLUE, false);
+    return feedback == LedFeedback::Essential || optionalLedFeedbackEnabled;
 }
 
-void blinkLed(uint8_t pin, uint8_t pulseCount)
+} // namespace
+
+void initializeStatusLeds(bool optionalFeedbackEnabled)
 {
+    optionalLedFeedbackEnabled = optionalFeedbackEnabled;
+
+    // Preload the inactive level before switching the active-low pins to
+    // outputs, avoiding a brief boot flash.
+    writeLed(LED_RED, false);
+    writeLed(LED_GREEN, false);
+    writeLed(LED_BLUE, false);
+    pinMode(LED_RED, OUTPUT);
+    pinMode(LED_GREEN, OUTPUT);
+    pinMode(LED_BLUE, OUTPUT);
+}
+
+void setLed(uint8_t pin, bool on, LedFeedback feedback)
+{
+    // Turning a channel off is never suppressed, so no stale LED can remain on.
+    writeLed(pin, on && feedbackEnabled(feedback));
+}
+
+void turnLedsOff()
+{
+    writeLed(LED_RED, false);
+    writeLed(LED_GREEN, false);
+    writeLed(LED_BLUE, false);
+}
+
+void blinkLed(uint8_t pin, uint8_t pulseCount, LedFeedback feedback)
+{
+    if (!feedbackEnabled(feedback)) {
+        return;
+    }
+
     for (uint8_t pulse = 0; pulse < pulseCount; ++pulse) {
-        setLed(pin, true);
+        writeLed(pin, true);
         delay(LED_PULSE_MS);
-        setLed(pin, false);
-        delay(LED_PULSE_MS);
+        writeLed(pin, false);
+
+        if (pulse + 1 < pulseCount) {
+            delay(LED_PULSE_MS);
+        }
     }
 }
 
@@ -50,9 +75,9 @@ void printHexByte(uint8_t value)
 {
     Serial.print(F("[FATAL] "));
     Serial.println(message);
+    blinkLed(LED_RED, 1, LedFeedback::Essential);
 
     while (true) {
-        blinkLed(LED_RED, 3);
         delay(1000);
     }
 }
