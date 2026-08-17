@@ -622,10 +622,18 @@ void bleEventCallback(ble_evt_t *event)
             beginConnectionSession(connectionHandle);
             return;
 
-        case BLE_GAP_EVT_DISCONNECTED:
+        case BLE_GAP_EVT_DISCONNECTED: {
+            const uint8_t reason =
+                event->evt.gap_evt.params.disconnected.reason;
+
+            Serial.print(F("[BLE] DISCONNECTED, HCI reason = 0x"));
+            if (reason < 0x10) Serial.print('0');
+            Serial.println(reason, HEX);
+
             endConnectionSession(connectionHandle);
             immediateSearchLedPending.store(true, std::memory_order_release);
             return;
+        }
 
         case BLE_GAP_EVT_CONN_SEC_UPDATE: {
             const uint32_t connectionState = activeConnectionState.load(
