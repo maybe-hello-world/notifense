@@ -292,6 +292,8 @@ void startManagedConnection(
     const uint16_t connectionHandle = connectionHandleFromState(
         connectionState
     );
+
+    // Disconnected state.
     if (connectionHandle == BLE_CONN_HANDLE_INVALID) {
         if (recoveryDisconnectExpected) {
             cleanupOnNextConnection = false;
@@ -299,22 +301,31 @@ void startManagedConnection(
         } else {
             ancsSetupAttemptCount = 0;
         }
+
         recoveryDisconnectExpected = false;
         diagnostics::setLed(LED_GREEN, false);
         immediateSearchLedPending.store(true, std::memory_order_release);
+
         advertisingRestartPending = true;
         advertisingRestartAt = now + ADVERTISING_RESTART_DELAY_MS;
+
         Serial.println();
-        Serial.println(F("[BLE] Disconnected; advertising restarts in 2 seconds"));
+        Serial.println(
+            F("[BLE] Disconnected; advertising restarts in 2 seconds")
+        );
         return;
     }
 
+    // Connected state.
     advertisingRestartPending = false;
     diagnostics::setLed(LED_GREEN, true);
+
     Serial.println();
     Serial.print(F("[BLE] Connected on handle "));
     Serial.println(connectionHandle);
 
+    // If ANCS recovery requested a cleanup-only connection, don't perform
+    // normal setup. updateCleanupDisconnect() will terminate this connection.
     if (cleanupOnNextConnection) {
         Serial.println(F("[ANCS] Running one cleanup-only connection"));
         cleanupDisconnectAttemptCount = 0;
@@ -322,11 +333,13 @@ void startManagedConnection(
         return;
     }
 
+    // Set connection-specific TX power.
     const uint32_t txPowerResult = sd_ble_gap_tx_power_set(
         BLE_GAP_TX_POWER_ROLE_CONN,
         connectionHandle,
         TX_POWER_DBM
     );
+
     if (
         txPowerResult != NRF_SUCCESS
         && txPowerResult != BLE_ERROR_INVALID_CONN_HANDLE
@@ -335,13 +348,30 @@ void startManagedConnection(
         signalBleError();
     }
 
-    Serial.println(F("[SEC] Requesting bonded Just Works pairing"));
-    Serial.println(F("[SEC] Accept the Pair request on the iPhone"));
-    if (!Bluefruit.Security._authenticate(connectionHandle)) {
-        Serial.println(F("[SEC] Pairing is already active or link is secured"));
+    // Use Bluefruit's public BLEConnection API instead of calling the
+    // internal Security._authenticate() method directly.
+    BLEConnection *connection = Bluefruit.Connection(connectionHandle);
+
+    if (connection == nullptr) {
+        Serial.println(F("[SEC] Could not get BLE connection object"));
+        signalBleError();
+        return;
+    }
+
+    if (connection->secured()) {
+        // This commonly happens on reconnect when the existing bond has
+        // already been used to restore encryption.
+        Serial.println(F("[SEC] Link already secured"));
+    } else {
+        Serial.println(F("[SEC] Requesting bonded Just Works pairing"));
+        Serial.println(F("[SEC] Accept the Pair request on the iPhone"));
+
+        if (!connection->requestPairing()) {
+            Serial.println(F("[SEC] Could not start pairing"));
+            signalBleError();
+        }
     }
 }
-
 void updateAncsSetup(unsigned long now)
 {
     const uint32_t connectionState = activeConnectionState.load(
