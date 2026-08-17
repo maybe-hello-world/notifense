@@ -34,6 +34,9 @@ void decideNotificationAction(const NotificationDetails &notification)
 {
     // Notification-specific haptic selection will be added here later.
     (void) notification;
+    if (notification.preExisting || notification.silent) {
+        return;
+    }
     hapticManager::playEffect(DEFAULT_NOTIFICATION_EFFECT);
 }
 
