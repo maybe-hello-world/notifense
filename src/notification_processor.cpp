@@ -5,7 +5,51 @@
 namespace notificationProcessor {
 namespace {
 
-constexpr uint8_t DEFAULT_NOTIFICATION_EFFECT = 1;
+constexpr uint8_t DEFAULT_NOTIFICATION_EFFECT = 13;
+constexpr uint8_t IMPORTANT_NOTIFICATION_EFFECT = 67;
+
+struct AppHapticRule {
+    const char *appId;
+    uint8_t effectId;
+    uint8_t count;
+};
+
+struct CategoryHapticRule {
+    uint8_t categoryId;
+    uint8_t effectId;
+    uint8_t count;
+};
+
+// App-specific haptic rules. 
+constexpr AppHapticRule APP_HAPTIC_RULES[] = {
+    {"com.google.Gmail", 37, 2},
+    {"com.google.Calendar", 48, 2},
+
+    {"com.openai.chat", 1, 1},
+
+    {"com.hammerandchisel.discord", 27, 1},
+    {"ph.telegra.Telegraph", 26, 3},
+};
+
+
+// Sparse category mapping.
+// ANCS category IDs correspond to your CATEGORY_NAMES table:
+// 0 Other
+// 1 Incoming Call
+// 2 Missed Call
+// 3 Voice Mail
+// 4 Social
+// 5 Schedule
+// 6 Email
+// 7 News
+// 8 Health/Fitness
+// 9 Business/Finance
+// 10 Location
+// 11 Entertainment
+constexpr CategoryHapticRule CATEGORY_HAPTIC_RULES[] = {
+    {1, 15, 1},  // Incoming Call
+    {2, 3, 5},  // Missed Call
+};
 
 const char *const EVENT_NAMES[] = {
     "Added",
@@ -28,15 +72,79 @@ const char *const CATEGORY_NAMES[] = {
     "Entertainment"
 };
 
+void playEffect(uint8_t effectId, uint8_t count)
+{
+    for (uint8_t i = 0; i < count; ++i) {
+        hapticManager::playEffect(effectId);
+    }
+}
+
+
+const AppHapticRule *findAppRule(const NotificationDetails &notification)
+{
+    if (notification.appIdLength == 0) {
+        return nullptr;
+    }
+
+    for (const auto &rule : APP_HAPTIC_RULES) {
+        const size_t ruleLength = strlen(rule.appId);
+
+        if (
+            notification.appIdLength == ruleLength
+            && memcmp(notification.appId, rule.appId, ruleLength) == 0
+        ) {
+            return &rule;
+        }
+    }
+
+    return nullptr;
+}
+
+
+const CategoryHapticRule *findCategoryRule(uint8_t categoryId)
+{
+    for (const auto &rule : CATEGORY_HAPTIC_RULES) {
+        if (rule.categoryId == categoryId) {
+            return &rule;
+        }
+    }
+
+    return nullptr;
+}
+
 } // namespace
 
 void decideNotificationAction(const NotificationDetails &notification)
 {
-    // Notification-specific haptic selection will be added here later.
-    (void) notification;
+    // Ignore silent or pre-existing notifications.
     if (notification.preExisting || notification.silent) {
         return;
     }
+
+    // Only react to newly-added notifications.
+    if (notification.eventId != ANCS_EVT_NOTIFICATION_ADDED) {
+        return;
+    }
+
+    // Important notifications get a pre-notification haptic.
+    if (notification.important) {
+        hapticManager::playEffect(IMPORTANT_NOTIFICATION_EFFECT);
+    }
+
+    // 1. App-specific rule has highest priority.
+    if (const AppHapticRule *rule = findAppRule(notification)) {
+        playEffect(rule->effectId, rule->count);
+        return;
+    }
+
+    // 2. Otherwise try category-specific rule.
+    if (const CategoryHapticRule *rule =
+            findCategoryRule(notification.categoryId)) {
+        playEffect(rule->effectId, rule->count);
+        return;
+    }
+
+    // 3. Otherwise default notification effect.
     hapticManager::playEffect(DEFAULT_NOTIFICATION_EFFECT);
 }
 
