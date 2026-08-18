@@ -20,6 +20,8 @@ struct CategoryHapticRule {
     uint8_t count;
 };
 
+// Effects: https://learn.adafruit.com/assets/72593
+
 // App-specific haptic rules. 
 constexpr AppHapticRule APP_HAPTIC_RULES[] = {
     {"com.google.Gmail", 37, 2},
