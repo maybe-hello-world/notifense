@@ -11,7 +11,7 @@ namespace {
 
 constexpr uint32_t SERIAL_BAUD = 9600;
 constexpr unsigned long SERIAL_WAIT_MS = 2000;
-constexpr size_t SERIAL_COMMAND_CAPACITY = 2;
+constexpr size_t SERIAL_COMMAND_CAPACITY = 5;
 
 char serialCommand[SERIAL_COMMAND_CAPACITY] = {};
 size_t serialCommandLength = 0;
@@ -23,6 +23,48 @@ constexpr bool ENABLE_OPTIONAL_LED_FEEDBACK = false;
 
 void dispatchSerialCommand()
 {
+    if (serialCommandLength == 0) {
+        return;
+    }
+
+    // P, P1 ... P123
+    if (serialCommand[0] == 'p' || serialCommand[0] == 'P') {
+        uint8_t effectId = 1;
+
+        if (serialCommandLength > 1) {
+            // Maximum valid command is P123.
+            if (serialCommandLength > 4) {
+                return;
+            }
+
+            unsigned int parsedEffectId = 0;
+
+            for (size_t i = 1; i < serialCommandLength; ++i) {
+                const char c = serialCommand[i];
+
+                if (c < '0' || c > '9') {
+                    return;
+                }
+
+                parsedEffectId =
+                    parsedEffectId * 10 + static_cast<unsigned int>(c - '0');
+            }
+
+            if (parsedEffectId < 1 || parsedEffectId > 123) {
+                Serial.println(F("[SERIAL] Haptic effect must be 1-123"));
+                return;
+            }
+
+            effectId = static_cast<uint8_t>(parsedEffectId);
+        }
+
+        Serial.print(F("[SERIAL] Playing test haptic effect "));
+        Serial.println(effectId);
+        hapticManager::playEffect(effectId);
+        return;
+    }
+
+    // All other commands are still exactly one character.
     if (serialCommandLength != 1) {
         return;
     }
@@ -42,28 +84,22 @@ void dispatchSerialCommand()
         case 'R':
             bleManager::retryAncsConnection();
             break;
-        
-        case 'p':
-        case 'P':
-            Serial.println(F("[SERIAL] Playing test haptic effect"));
-            hapticManager::playEffect(1);
-            break;
-        
+
         case 'v':
         case 'V':
             voltageHistory::report();
             break;
-        
+
         case 'h':
         case 'H':
             Serial.println(
                 F("[SERIAL] Commands: "
-                "B=battery, "
-                "V=voltage history, "
-                "C=clear bonds, "
-                "R=retry BLE, "
-                "P=play haptic, "
-                "H=help")
+                  "B=battery, "
+                  "V=voltage history, "
+                  "C=clear bonds, "
+                  "R=retry BLE, "
+                  "P[1-123]=play haptic, "
+                  "H=help")
             );
             break;
 
