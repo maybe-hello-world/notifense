@@ -12,7 +12,7 @@ constexpr unsigned long USB_POLL_INTERVAL_MS = 1000UL;
 
 // One voltage measurement every 5 minutes.
 constexpr unsigned long SAMPLE_INTERVAL_MS =
-    5UL * 60UL * 1000UL;
+    15UL * 60UL * 1000UL;
 
 // 576 * 5 minutes = 2880 minutes = 48 hours.
 //
